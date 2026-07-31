@@ -1,4 +1,4 @@
-name: Build Vcam_Mch (Rootless · iOS 15 · iPhone 7)
+name: Build Vcam_Mch (Rootless + RootHide · iOS 15 · iPhone 7)
 
 on:
   push:
@@ -9,8 +9,17 @@ on:
 
 jobs:
   build:
-    name: Build .deb
+    name: Build .deb (${{ matrix.scheme }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scheme: rootless
+            label: Rootless
+          - scheme: roothide
+            label: RootHide
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────
@@ -23,8 +32,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ubuntu-v6
-          restore-keys: theos-ubuntu-v6
+          key: theos-ubuntu-v7
+          restore-keys: theos-ubuntu-v7
 
       - name: Clone Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -39,74 +48,70 @@ jobs:
         id: cache-sdk
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/theos/sdks
-          key: sdk-ios156-master-146e41f
+          path: ${{ github.workspace }}/theos/sdks/iPhoneOS15.6.sdk
+          key: sdk-ios156-v1
 
       - name: Download iOS 15.6 SDK
         if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
           mkdir -p $GITHUB_WORKSPACE/theos/sdks
-          # URL đúng từ theos/sdks release master-146e41f
           curl -fL \
             "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz" \
             -o /tmp/sdk.tar.xz
           tar -xJf /tmp/sdk.tar.xz -C $GITHUB_WORKSPACE/theos/sdks
-          echo "SDKs:"
           ls $GITHUB_WORKSPACE/theos/sdks/
 
-      # ── 4. Install build deps ────────────────────────────────
-      - name: Install deps
+      # ── 4. Install deps ──────────────────────────────────────
+      - name: Install build deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             dpkg-dev fakeroot xz-utils zstd curl git perl make \
             clang lld
 
-          # ldid binary (codesign cho iOS)
+          # ldid
           curl -fL \
             "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64" \
             -o /usr/local/bin/ldid
           chmod +x /usr/local/bin/ldid
-          ldid --version 2>/dev/null || echo "ldid ok"
 
       # ── 5. Build ─────────────────────────────────────────────
-      - name: Build .deb (rootless, arm64)
+      - name: Build .deb (${{ matrix.label }}, arm64)
         run: |
           export THEOS=$GITHUB_WORKSPACE/theos
           export PATH=$THEOS/bin:$PATH
           export ARCHS=arm64
           export TARGET="iphone:clang:15.6:15.0"
-          export THEOS_PACKAGE_SCHEME=rootless
+          export THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
           export STRIP=0
 
           mkdir -p packages
 
           make package \
-            THEOS_PACKAGE_SCHEME=rootless \
+            THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
             STRIP=0 \
             2>&1 | tee $GITHUB_WORKSPACE/build.log
 
           BUILD_EXIT=${PIPESTATUS[0]}
-          echo ""
-          echo "==== Build exit: $BUILD_EXIT ===="
-          ls -la packages/ 2>/dev/null || echo "(no packages/)"
+          echo "===== Build exit: $BUILD_EXIT ====="
+          ls -la packages/ 2>/dev/null || echo "(no packages)"
           exit $BUILD_EXIT
 
-      # ── 6. Upload build log (always) ─────────────────────────
+      # ── 6. Upload log (always) ───────────────────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ github.run_number }}
+          name: build-log-${{ matrix.scheme }}-${{ github.run_number }}
           path: ${{ github.workspace }}/build.log
           retention-days: 7
 
       # ── 7. Upload .deb ───────────────────────────────────────
-      - name: Upload .deb
+      - name: Upload .deb (${{ matrix.label }})
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Vcam_Mch-rootless-${{ github.run_number }}
+          name: Vcam_Mch-${{ matrix.scheme }}-${{ github.run_number }}
           path: packages/*.deb
           if-no-files-found: warn
           retention-days: 30
