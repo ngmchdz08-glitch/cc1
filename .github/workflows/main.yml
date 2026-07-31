@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build .deb
-    runs-on: ubuntu-latest      # Ubuntu nhanh hơn macOS nhiều
+    runs-on: ubuntu-latest
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────
@@ -23,8 +23,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ubuntu-v4-${{ hashFiles('**/Makefile') }}
-          restore-keys: theos-ubuntu-v4-
+          key: theos-ubuntu-v6
+          restore-keys: theos-ubuntu-v6
 
       - name: Clone Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -34,37 +34,40 @@ jobs:
           path: theos
           submodules: recursive
 
-      # ── 3. Cache iOS 15.5 SDK ────────────────────────────────
+      # ── 3. Cache iOS 15.6 SDK ────────────────────────────────
       - name: Cache SDK
         id: cache-sdk
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/theos/sdks/iPhoneOS15.5.sdk
-          key: sdk-ios155-v2
+          path: ${{ github.workspace }}/theos/sdks
+          key: sdk-ios156-master-146e41f
 
-      - name: Download iOS 15.5 SDK
+      - name: Download iOS 15.6 SDK
         if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
           mkdir -p $GITHUB_WORKSPACE/theos/sdks
-          curl -fsSL \
-            "https://github.com/theos/sdks/releases/download/variantmacos-monolib/iPhoneOS15.5.sdk.tar.xz" \
+          # URL đúng từ theos/sdks release master-146e41f
+          curl -fL \
+            "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz" \
             -o /tmp/sdk.tar.xz
           tar -xJf /tmp/sdk.tar.xz -C $GITHUB_WORKSPACE/theos/sdks
+          echo "SDKs:"
+          ls $GITHUB_WORKSPACE/theos/sdks/
 
-      # ── 4. Install deps (Ubuntu) ─────────────────────────────
-      - name: Install ldid + dpkg tools
+      # ── 4. Install build deps ────────────────────────────────
+      - name: Install deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev fakeroot xz-utils zstd curl git perl make
+            dpkg-dev fakeroot xz-utils zstd curl git perl make \
+            clang lld
 
-          # ldid từ theos
-          curl -fsSL https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 \
+          # ldid binary (codesign cho iOS)
+          curl -fL \
+            "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64" \
             -o /usr/local/bin/ldid
           chmod +x /usr/local/bin/ldid
-
-          # clang cross-compiler cho arm64
-          sudo apt-get install -y clang lld
+          ldid --version 2>/dev/null || echo "ldid ok"
 
       # ── 5. Build ─────────────────────────────────────────────
       - name: Build .deb (rootless, arm64)
@@ -72,9 +75,8 @@ jobs:
           export THEOS=$GITHUB_WORKSPACE/theos
           export PATH=$THEOS/bin:$PATH
           export ARCHS=arm64
-          export TARGET="iphone:clang:15.5:15.0"
+          export TARGET="iphone:clang:15.6:15.0"
           export THEOS_PACKAGE_SCHEME=rootless
-          export SYSROOT=$THEOS/sdks/iPhoneOS15.5.sdk
           export STRIP=0
 
           mkdir -p packages
@@ -82,36 +84,29 @@ jobs:
           make package \
             THEOS_PACKAGE_SCHEME=rootless \
             STRIP=0 \
-            2>&1 | tee build.log
+            2>&1 | tee $GITHUB_WORKSPACE/build.log
 
-          echo "---BUILD EXIT: $?---"
-          ls -la packages/ || true
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo ""
+          echo "==== Build exit: $BUILD_EXIT ===="
+          ls -la packages/ 2>/dev/null || echo "(no packages/)"
+          exit $BUILD_EXIT
 
-      # ── 6. Upload log (always) ───────────────────────────────
+      # ── 6. Upload build log (always) ─────────────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.run_number }}
-          path: build.log
+          path: ${{ github.workspace }}/build.log
           retention-days: 7
 
       # ── 7. Upload .deb ───────────────────────────────────────
       - name: Upload .deb
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Vcam_Mch-rootless-${{ github.run_number }}
           path: packages/*.deb
           if-no-files-found: warn
           retention-days: 30
-
-      # ── 8. Print info ────────────────────────────────────────
-      - name: Show .deb info
-        if: always()
-        run: |
-          for deb in packages/*.deb; do
-            [ -f "$deb" ] || continue
-            echo "===== $deb ====="
-            dpkg-deb --info "$deb" || true
-            dpkg-deb --contents "$deb" | head -30 || true
-          done
