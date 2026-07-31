@@ -1,0 +1,133 @@
+name: Build Vcam_Mch (Rootless · iOS 15 · iPhone 7)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  # Theos rootless build target
+  THEOS_PACKAGE_SCHEME: rootless
+  TARGET_IPHONE_DEPLOYMENT_VERSION: "15.0"
+
+jobs:
+  build:
+    name: Build .deb
+    runs-on: macos-13          # macos-13 = Xcode 15, Apple Silicon + x86_64
+
+    steps:
+      # ── 1. Checkout source ──────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Install system deps ───────────────────────────────
+      - name: Install deps (ldid, dpkg, xz, zstd)
+        run: |
+          brew install ldid dpkg xz zstd
+
+      # ── 3. Setup Theos (cache aware) ────────────────────────
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-v3-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            theos-v3-${{ runner.os }}-
+
+      - name: Clone Theos (if not cached)
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/theos/theos.git \
+            $GITHUB_WORKSPACE/theos
+
+      # ── 4. Download iOS 15 SDK ──────────────────────────────
+      - name: Cache iOS SDKs
+        id: cache-sdks
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos/sdks
+          key: theos-sdks-ios15-v1
+
+      - name: Download iOS 15.5 SDK
+        if: steps.cache-sdks.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/theos/sdks
+          curl -fsSL \
+            "https://github.com/theos/sdks/releases/download/variantmacos-monolib/iPhoneOS15.5.sdk.tar.xz" \
+            -o /tmp/sdk.tar.xz
+          tar -xJf /tmp/sdk.tar.xz -C $GITHUB_WORKSPACE/theos/sdks
+
+      # ── 5. Setup Theos env ──────────────────────────────────
+      - name: Setup Theos env
+        run: |
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> $GITHUB_ENV
+          echo "$GITHUB_WORKSPACE/theos/bin" >> $GITHUB_PATH
+
+      # ── 6. Install Theos Perl deps ──────────────────────────
+      - name: Install Theos Perl deps
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          perl $THEOS/bin/theosinstall 2>/dev/null || true
+
+      # ── 7. Create packages dir ──────────────────────────────
+      - name: Prepare
+        run: |
+          mkdir -p packages
+
+      # ── 8. Build ─────────────────────────────────────────────
+      - name: Build .deb (rootless)
+        working-directory: ${{ github.workspace }}
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          export ARCHS="arm64"
+          export TARGET="iphone:clang:15.5:15.0"
+          export THEOS_PACKAGE_SCHEME=rootless
+
+          # Symlink packages output vào root
+          make package \
+            THEOS_PACKAGE_SCHEME=rootless \
+            STRIP=0 \
+            2>&1 | tee build.log
+
+          # Check build result
+          if [ $? -ne 0 ]; then
+            echo "::error::Build failed — xem build.log bên dưới"
+            cat build.log
+            exit 1
+          fi
+
+          echo "✅ Build thành công!"
+          ls -la packages/*.deb 2>/dev/null || (echo "Không tìm thấy .deb"; ls -la; exit 1)
+
+      # ── 9. Upload build log (always) ────────────────────────
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      # ── 10. Upload .deb artifact ────────────────────────────
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vcam_Mch-rootless-iOS15-${{ github.run_number }}
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── 11. Print deb info ──────────────────────────────────
+      - name: Show .deb info
+        run: |
+          for deb in packages/*.deb; do
+            echo "======== $deb ========"
+            dpkg-deb --info "$deb" || true
+            echo ""
+            dpkg-deb --contents "$deb" | head -40 || true
+          done
