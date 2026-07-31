@@ -1,0 +1,8 @@
+Package: com.mch.vcam
+Name: Vcam_Mch
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Fake Camera + OBS Stream + AntiBank for RootHide
+Maintainer: mch
+Author: mch
+Section: Tweaks

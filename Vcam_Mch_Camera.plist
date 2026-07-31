@@ -1,0 +1,6 @@
+Filter = {
+    Executables = (
+        "mediaserverd",
+        "cameracaptured"
+    );
+};
