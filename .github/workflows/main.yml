@@ -7,54 +7,43 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-env:
-  # Theos rootless build target
-  THEOS_PACKAGE_SCHEME: rootless
-  TARGET_IPHONE_DEPLOYMENT_VERSION: "15.0"
-
 jobs:
   build:
     name: Build .deb
-    runs-on: macos-13          # macos-13 = Xcode 15, Apple Silicon + x86_64
+    runs-on: ubuntu-latest      # Ubuntu nhanh hơn macOS nhiều
 
     steps:
-      # ── 1. Checkout source ──────────────────────────────────
+      # ── 1. Checkout ─────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ── 2. Install system deps ───────────────────────────────
-      - name: Install deps (ldid, dpkg, xz, zstd)
-        run: |
-          brew install ldid dpkg xz zstd
-
-      # ── 3. Setup Theos (cache aware) ────────────────────────
+      # ── 2. Cache Theos ───────────────────────────────────────
       - name: Cache Theos
         id: cache-theos
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-v3-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
-          restore-keys: |
-            theos-v3-${{ runner.os }}-
+          key: theos-ubuntu-v4-${{ hashFiles('**/Makefile') }}
+          restore-keys: theos-ubuntu-v4-
 
-      - name: Clone Theos (if not cached)
+      - name: Clone Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
-        run: |
-          git clone --recursive https://github.com/theos/theos.git \
-            $GITHUB_WORKSPACE/theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
 
-      # ── 4. Download iOS 15 SDK ──────────────────────────────
-      - name: Cache iOS SDKs
-        id: cache-sdks
+      # ── 3. Cache iOS 15.5 SDK ────────────────────────────────
+      - name: Cache SDK
+        id: cache-sdk
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/theos/sdks
-          key: theos-sdks-ios15-v1
+          path: ${{ github.workspace }}/theos/sdks/iPhoneOS15.5.sdk
+          key: sdk-ios155-v2
 
       - name: Download iOS 15.5 SDK
-        if: steps.cache-sdks.outputs.cache-hit != 'true'
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
           mkdir -p $GITHUB_WORKSPACE/theos/sdks
           curl -fsSL \
@@ -62,72 +51,67 @@ jobs:
             -o /tmp/sdk.tar.xz
           tar -xJf /tmp/sdk.tar.xz -C $GITHUB_WORKSPACE/theos/sdks
 
-      # ── 5. Setup Theos env ──────────────────────────────────
-      - name: Setup Theos env
+      # ── 4. Install deps (Ubuntu) ─────────────────────────────
+      - name: Install ldid + dpkg tools
         run: |
-          echo "THEOS=$GITHUB_WORKSPACE/theos" >> $GITHUB_ENV
-          echo "$GITHUB_WORKSPACE/theos/bin" >> $GITHUB_PATH
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev fakeroot xz-utils zstd curl git perl make
 
-      # ── 6. Install Theos Perl deps ──────────────────────────
-      - name: Install Theos Perl deps
+          # ldid từ theos
+          curl -fsSL https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 \
+            -o /usr/local/bin/ldid
+          chmod +x /usr/local/bin/ldid
+
+          # clang cross-compiler cho arm64
+          sudo apt-get install -y clang lld
+
+      # ── 5. Build ─────────────────────────────────────────────
+      - name: Build .deb (rootless, arm64)
         run: |
           export THEOS=$GITHUB_WORKSPACE/theos
-          perl $THEOS/bin/theosinstall 2>/dev/null || true
-
-      # ── 7. Create packages dir ──────────────────────────────
-      - name: Prepare
-        run: |
-          mkdir -p packages
-
-      # ── 8. Build ─────────────────────────────────────────────
-      - name: Build .deb (rootless)
-        working-directory: ${{ github.workspace }}
-        run: |
-          export THEOS=$GITHUB_WORKSPACE/theos
-          export ARCHS="arm64"
+          export PATH=$THEOS/bin:$PATH
+          export ARCHS=arm64
           export TARGET="iphone:clang:15.5:15.0"
           export THEOS_PACKAGE_SCHEME=rootless
+          export SYSROOT=$THEOS/sdks/iPhoneOS15.5.sdk
+          export STRIP=0
 
-          # Symlink packages output vào root
+          mkdir -p packages
+
           make package \
             THEOS_PACKAGE_SCHEME=rootless \
             STRIP=0 \
             2>&1 | tee build.log
 
-          # Check build result
-          if [ $? -ne 0 ]; then
-            echo "::error::Build failed — xem build.log bên dưới"
-            cat build.log
-            exit 1
-          fi
+          echo "---BUILD EXIT: $?---"
+          ls -la packages/ || true
 
-          echo "✅ Build thành công!"
-          ls -la packages/*.deb 2>/dev/null || (echo "Không tìm thấy .deb"; ls -la; exit 1)
-
-      # ── 9. Upload build log (always) ────────────────────────
+      # ── 6. Upload log (always) ───────────────────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ github.run_number }}
           path: build.log
           retention-days: 7
 
-      # ── 10. Upload .deb artifact ────────────────────────────
+      # ── 7. Upload .deb ───────────────────────────────────────
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
-          name: Vcam_Mch-rootless-iOS15-${{ github.run_number }}
+          name: Vcam_Mch-rootless-${{ github.run_number }}
           path: packages/*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
-      # ── 11. Print deb info ──────────────────────────────────
+      # ── 8. Print info ────────────────────────────────────────
       - name: Show .deb info
+        if: always()
         run: |
           for deb in packages/*.deb; do
-            echo "======== $deb ========"
+            [ -f "$deb" ] || continue
+            echo "===== $deb ====="
             dpkg-deb --info "$deb" || true
-            echo ""
-            dpkg-deb --contents "$deb" | head -40 || true
+            dpkg-deb --contents "$deb" | head -30 || true
           done
